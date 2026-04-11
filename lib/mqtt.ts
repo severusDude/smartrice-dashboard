@@ -1,9 +1,29 @@
 import mqtt from "mqtt";
 import { EventEmitter } from "events";
-import { latestData } from "./data";
+import {
+  SensorData,
+  ProcessedData,
+  RiceStatus,
+  RiceCookerStatus,
+} from "./data";
+import { processSensorData } from "./smartriceCore";
 
 export const mqttEmitter = new EventEmitter();
 let mqttClient: mqtt.MqttClient | null = null;
+
+let rawData: SensorData = {
+  temp: 0,
+  weight: 0,
+  gas: 0,
+  humidity: 0,
+};
+
+let latestProcessed: ProcessedData = {
+  freshnessScore: 0,
+  status: RiceStatus.Unavailable,
+};
+
+let riceCookerStatus: RiceCookerStatus = RiceCookerStatus.Unavailable;
 
 export function initMQTT() {
   if (mqttClient) return mqttClient;
@@ -27,20 +47,32 @@ export function initMQTT() {
   });
 
   mqttClient.on("message", (topic: string, message: Buffer) => {
-    const payload = message.toString();
+    const payload = message.toString().trim();
     console.log(`[${topic}] ${payload}`);
 
-    if (topic === "smartrice/data/temp") latestData.temp = parseFloat(payload);
-    else if (topic === "smartrice/data/humidity")
-      latestData.humidity = parseFloat(payload);
-    else if (topic === "smartrice/data/berat")
-      latestData.berat = parseInt(payload);
-    else if (topic === "smartrice/data/status") latestData.status = payload;
+    // Update raw sensor data
+    if (topic === "smartrice/data/temp") {
+      rawData.temp = parseFloat(payload) || 0;
+    } else if (topic === "smartrice/data/weight") {
+      rawData.weight = parseInt(payload) || 0;
+    } else if (topic === "smartrice/data/gas") {
+      rawData.gas = parseInt(payload) || 0;
+    } else if (topic === "smartrice/data/humidity") {
+      rawData.humidity = parseFloat(payload) || 0;
+    } else if (topic === "smartrice/data/riceCookerStatus") {
+      riceCookerStatus = payload as RiceCookerStatus;
+    }
 
-    latestData.lastUpdated = new Date();
+    // Process rice condition (uses refined smartriceCore.ts logic)
+    const processedData = processSensorData(rawData);
+    latestProcessed = processedData;
 
-    // Broadcast to ALL SSE clients
-    mqttEmitter.emit("update", { ...latestData });
+    // Broadcast FULL data to ALL SSE clients
+    mqttEmitter.emit("update", {
+      ...rawData,
+      ...processedData,
+      riceCookerStatus,
+    });
   });
 
   mqttClient.on("error", (err) => console.error("MQTT Error:", err));
@@ -49,7 +81,11 @@ export function initMQTT() {
 }
 
 export function getLatestData() {
-  return { ...latestData };
+  return {
+    ...rawData,
+    ...latestProcessed,
+    riceCookerStatus,
+  };
 }
 
 export function publishPemanas(command: "ON" | "OFF") {

@@ -10,20 +10,15 @@ import {
   PowerOff,
 } from "lucide-react";
 
-type RiceCookerStatus =
-  | "Cooking"
-  | "Heating"
-  | "Spoiled"
-  | "Standby"
-  | "Off"
-  | "Unknown";
+import {
+  SensorData,
+  ProcessedData,
+  RiceStatus,
+  RiceCookerStatus,
+} from "@/lib/data";
 
-interface RiceCookerData {
-  temp: number;
-  humidity: number;
-  berat: number;
-  status: RiceCookerStatus;
-  lastUpdated: Date; // ← added to match backend SSE payload
+interface RiceCookerData extends SensorData, ProcessedData {
+  riceCookerStatus: RiceCookerStatus;
 }
 
 interface KpiCardProps {
@@ -69,68 +64,89 @@ function KpiCard({
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const styles: Record<string, string> = {
-    Cooking: "bg-emerald-50 text-emerald-700",
-    Standby: "bg-gray-100 text-gray-500",
-    Unknown: "bg-gray-100 text-gray-500",
-  };
-  return (
-    <span
-      className={`text-xs font-medium px-3 py-1 rounded-full ${
-        styles[status] ?? styles["Unknown"]
-      }`}
-    >
-      {status}
-    </span>
-  );
+function getRiceStatusDisplay(status: RiceStatus) {
+  const map: Record<RiceStatus, { label: string; color: string; bg: string }> =
+    {
+      [RiceStatus.Segar]: {
+        label: "Segar",
+        color: "text-emerald-700",
+        bg: "bg-emerald-50",
+      },
+      [RiceStatus.Waspada]: {
+        label: "Waspada",
+        color: "text-amber-700",
+        bg: "bg-amber-50",
+      },
+      [RiceStatus.Basi]: {
+        label: "Basi!",
+        color: "text-red-700",
+        bg: "bg-red-50",
+      },
+      [RiceStatus.Unavailable]: {
+        label: "Unavailable",
+        color: "text-gray-500",
+        bg: "bg-gray-100",
+      },
+    };
+  return map[status] || map[RiceStatus.Unavailable];
 }
 
-const getRelativeTime = (date: Date): string => {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const diffSec = Math.floor(diffMs / 1000);
+function getRiceCookerStatusDisplay(status: RiceCookerStatus) {
+  const map: Record<RiceCookerStatus, { label: string; color: string }> = {
+    [RiceCookerStatus.Cooking]: { label: "Cooking", color: "text-emerald-600" },
+    [RiceCookerStatus.Heating]: { label: "Heating", color: "text-emerald-600" },
+    [RiceCookerStatus.Spoiled]: { label: "Spoiled", color: "text-red-600" },
+    [RiceCookerStatus.Standby]: { label: "Standby", color: "text-gray-500" },
+    [RiceCookerStatus.Off]: { label: "Off", color: "text-gray-500" },
+    [RiceCookerStatus.Unavailable]: {
+      label: "Unavailable",
+      color: "text-gray-500",
+    },
+  };
+  return map[status] || map[RiceCookerStatus.Unavailable];
+}
 
-  if (diffSec < 10) return "just now";
-  if (diffSec < 60) return `${diffSec} seconds ago`;
-
-  const minutes = Math.floor(diffSec / 60);
-  if (minutes < 60) {
-    return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
-  }
-
-  const hours = Math.floor(minutes / 60);
-  return `${hours} hour${hours > 1 ? "s" : ""} ago`;
+const getFreshnessColor = (score: number) => {
+  if (score >= 70) return { text: "text-emerald-600", bg: "bg-emerald-50" };
+  if (score >= 40) return { text: "text-amber-600", bg: "bg-amber-50" };
+  return { text: "text-red-600", bg: "bg-red-50" };
 };
 
 export default function App() {
   const [data, setData] = useState<RiceCookerData>({
     temp: 0,
+    weight: 0,
+    gas: 0,
     humidity: 0,
-    berat: 0,
-    status: "Unknown",
-    lastUpdated: new Date(),
+    freshnessScore: 0,
+    status: RiceStatus.Unavailable,
+    riceCookerStatus: RiceCookerStatus.Unavailable,
   });
+
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
   const [relativeTime, setRelativeTime] = useState("just now");
-  const [heaterOn, setHeaterOn] = useState(false);
 
-  // SSE live updates (new Next.js endpoint)
+  // SSE live updates
   useEffect(() => {
     const eventSource = new EventSource("/api/rice-cooker-updates");
 
     eventSource.onmessage = (event) => {
       const raw = JSON.parse(event.data);
 
-      // Convert lastUpdated string (from JSON) back to Date
-      const parsedData: RiceCookerData = {
+      const updatedData: RiceCookerData = {
         ...raw,
-        lastUpdated: new Date(raw.lastUpdated),
+        // Ensure all fields exist (safety)
+        temp: raw.temp ?? 0,
+        weight: raw.weight ?? 0,
+        gas: raw.gas ?? 0,
+        humidity: raw.humidity ?? 0,
+        freshnessScore: raw.freshnessScore ?? 0,
+        status: raw.status ?? RiceStatus.Unavailable,
+        riceCookerStatus: raw.riceCookerStatus ?? RiceCookerStatus.Unavailable,
       };
 
-      setData(parsedData);
-      console.log(data);
-      setLastRefresh(parsedData.lastUpdated); // ← now live relative time works
+      setData(updatedData);
+      setLastRefresh(new Date());
     };
 
     eventSource.onerror = () => {
@@ -148,10 +164,8 @@ export default function App() {
     return () => clearInterval(interval);
   }, [lastRefresh]);
 
-  // Toggle heater (now uses relative Next.js API route)
+  // Toggle heater
   const toggleHeater = async (cmd: "ON" | "OFF") => {
-    setHeaterOn(cmd === "ON"); // optimistic UI
-
     try {
       const res = await fetch("/api/pemanas", {
         method: "POST",
@@ -162,10 +176,12 @@ export default function App() {
       if (!res.ok) throw new Error("Failed to send command");
     } catch (err) {
       console.error("Heater command failed:", err);
-      // Optional: revert optimistic state if you want
-      // setHeaterOn(cmd === "OFF");
     }
   };
+
+  const riceStatusDisplay = getRiceStatusDisplay(data.status);
+  const cookerDisplay = getRiceCookerStatusDisplay(data.riceCookerStatus);
+  const freshnessStyle = getFreshnessColor(data.freshnessScore);
 
   return (
     <div className="min-h-screen bg-gray-50 flex items-start justify-center p-6">
@@ -210,7 +226,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* KPI Grid */}
+        {/* KPI Grid - 2x2 */}
         <div className="grid grid-cols-2 gap-3 mb-3">
           <KpiCard
             label="Temperature"
@@ -228,22 +244,25 @@ export default function App() {
             iconBg="bg-blue-50"
             iconColor="text-blue-500"
           />
-        </div>
-
-        {/* Weight */}
-        <div className="mb-3">
           <KpiCard
             label="Weight"
-            value={data.berat}
+            value={data.weight}
             unit="g"
             icon={<Weight size={16} />}
             iconBg="bg-violet-50"
             iconColor="text-violet-500"
-            className="w-full"
+          />
+          <KpiCard
+            label="Freshness"
+            value={data.freshnessScore}
+            unit="%"
+            icon={<Clock size={16} />}
+            iconBg={freshnessStyle.bg}
+            iconColor={freshnessStyle.text}
           />
         </div>
 
-        {/* Status Card */}
+        {/* Rice Condition */}
         <div className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center justify-between mb-3">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-emerald-50 flex items-center justify-center">
@@ -254,27 +273,44 @@ export default function App() {
                 Status Nasi
               </p>
               <p className="text-base font-medium text-gray-900 mt-0.5">
-                {data.status}
+                {riceStatusDisplay.label}
               </p>
             </div>
           </div>
-          <StatusBadge status={data.status} />
+          <span
+            className={`text-xs font-medium px-3 py-1 rounded-full ${riceStatusDisplay.bg} ${riceStatusDisplay.color}`}
+          >
+            {riceStatusDisplay.label}
+          </span>
         </div>
 
-        {/* Heater Controls */}
+        {/* Rice Cooker Controls */}
         <div className="bg-white border border-gray-100 rounded-2xl p-5">
-          <p className="text-xs text-gray-400 uppercase tracking-wider mb-4 font-semibold">
-            Rice Cooker Status
-          </p>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-xs text-gray-400 uppercase tracking-wider font-semibold">
+              Rice Cooker Status
+            </p>
+            <span
+              className={`text-xs font-medium px-3 py-1 rounded-full ${cookerDisplay.color === "text-emerald-600" ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-500"}`}
+            >
+              {cookerDisplay.label}
+            </span>
+          </div>
 
           <div className="flex items-center justify-between">
             <div>
               <span
                 className={`text-5xl font-semibold tracking-tighter transition-colors ${
-                  heaterOn ? "text-emerald-600" : "text-gray-300"
+                  data.riceCookerStatus === RiceCookerStatus.Heating ||
+                  data.riceCookerStatus === RiceCookerStatus.Cooking
+                    ? "text-emerald-600"
+                    : "text-gray-300"
                 }`}
               >
-                {heaterOn ? "ON" : "OFF"}
+                {data.riceCookerStatus === RiceCookerStatus.Heating ||
+                data.riceCookerStatus === RiceCookerStatus.Cooking
+                  ? "ON"
+                  : "OFF"}
               </span>
             </div>
 
@@ -300,3 +336,20 @@ export default function App() {
     </div>
   );
 }
+
+const getRelativeTime = (date: Date): string => {
+  const now = new Date();
+  const diffMs = now.getTime() - date.getTime();
+  const diffSec = Math.floor(diffMs / 1000);
+
+  if (diffSec < 10) return "just now";
+  if (diffSec < 60) return `${diffSec} seconds ago`;
+
+  const minutes = Math.floor(diffSec / 60);
+  if (minutes < 60) {
+    return `${minutes} minute${minutes > 1 ? "s" : ""} ago`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours} hour${hours > 1 ? "s" : ""} ago`;
+};
